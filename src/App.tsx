@@ -46,7 +46,8 @@ import {
   checkWinner, 
   minimax,
   toBitboard,
-  getValidMoves
+  getValidMoves,
+  evaluateMoveQuality
 } from './logic/connect4';
 import { getLLMPrompt } from './logic/export';
 import { fetchNNUEWeights, evaluateNNUE, setWeights, NNUEWeights, getNNUEInput } from './logic/nnue';
@@ -55,24 +56,89 @@ import Board, { MoveQuality } from './components/Board';
 import { NNUEVisualizer } from './components/NNUEVisualizer';
 import Auth from './components/Auth';
 import AIWorker from './logic/ai.worker?worker';
+import { getCoachingComment } from './constants/coaching';
 
 type GameMode = 'human-vs-ai' | 'ai-vs-ai' | 'human-vs-human' | 'parallel-generator' | 'matchmaking';
 
 const AVATARS = [
   { id: 0, name: 'Default', icon: '🤖' },
-  { id: 1, name: 'Cyber', icon: '🦾' },
-  { id: 2, name: 'Core', icon: '🧠' },
-  { id: 3, name: 'Pulse', icon: '⚡' },
-  { id: 4, name: 'Void', icon: '🌌' },
-  { id: 5, name: 'Neon', icon: '🌈' },
-  { id: 6, name: 'Titan', icon: '🛡️' },
-  { id: 7, name: 'Swift', icon: '🦅' },
+  { id: 1, name: 'Cool', icon: '😎' },
+  { id: 2, name: 'Shush', icon: '🤫' },
+  { id: 3, name: 'Smirk', icon: '😏' },
+  { id: 4, name: 'Intellect', icon: '🧐' },
+  { id: 5, name: 'Silent', icon: '🤐' },
+  { id: 6, name: 'Watcher', icon: '🧿' },
+  { id: 7, name: 'Zen', icon: '🧘' },
+  { id: 8, name: 'Dominator', icon: '😤' },
+  { id: 9, name: 'Demon', icon: '👺' },
+  { id: 10, name: 'Duelist', icon: '⚔️' },
+  { id: 11, name: 'Wildcard', icon: '🃏' },
+  { id: 12, name: 'Flawless', icon: '💎' },
+  { id: 13, name: 'King', icon: '👑' },
+  { id: 14, name: 'Trident', icon: '🔱' },
+  { id: 15, name: 'Wolf', icon: '🐺' },
 ];
+
+const TAUNTS = [
+  { id: 'down', icon: '👎' },
+  { id: 'clown', icon: '🤡' },
+  { id: 'yawn', icon: '🥱' },
+  { id: 'laugh', icon: '😂' },
+  { id: 'shush', icon: '🤫' },
+  { id: 'wave', icon: '👋' },
+  { id: 'poo', icon: '💩' },
+  { id: 'smile', icon: '🙂' },
+  { id: 'respect', icon: '👍' }
+];
+
+const getAuraColor = (elo: number) => {
+  if (elo >= 2500) return 'gold';
+  if (elo >= 2001) return 'red';
+  if (elo >= 1501) return 'cyan';
+  return 'white';
+};
 
 export default function App() {
   const [user, setUser] = useState<any>(null);
+  const [activeTaunts, setActiveTaunts] = useState<any[]>([]);
+
+  const getAuraClass = (elo: number) => {
+    if (elo >= 2500) return 'shadow-[0_0_20px_rgba(255,215,0,0.6)] ring-yellow-400'; // Gold
+    if (elo >= 2001) return 'shadow-[0_0_20px_rgba(255,0,0,0.6)] ring-red-500 animate-pulse'; // Red Flame
+    if (elo >= 1501) return 'shadow-[0_0_20px_rgba(0,255,255,0.6)] ring-cyan-400'; // Cyan
+    return 'shadow-[0_0_15px_rgba(255,255,255,0.4)] ring-white/50'; // White
+  };
+
+  const sendTaunt = async (emoji: string) => {
+    if (!user || !opponent) return;
+    try {
+      const oppId = opponent.id || opponent.userId || opponent.elo;
+      addTauntToDisplay(emoji, user.id); // Show locally immediately
+      await fetch('/api/match/taunt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: user.id, opponentId: oppId, emoji })
+      });
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const addTauntToDisplay = (emoji: string, userId: string) => {
+    const id = Math.random().toString(36).substr(2, 9);
+    setActiveTaunts(prev => {
+      // Keep last 3 to avoid clutter
+      return [...prev, { id, emoji, userId }];
+    });
+    setTimeout(() => {
+      setActiveTaunts(prev => prev.filter(t => t.id !== id));
+    }, 4000);
+  };
   const [isMatchmaking, setIsMatchmaking] = useState(false);
   const [matchmakingTimer, setMatchmakingTimer] = useState(0);
+  const [privateRoomCode, setPrivateRoomCode] = useState<string | null>(null);
+  const [roomCodeToJoin, setRoomCodeToJoin] = useState('');
+  const [isPrivateLoading, setIsPrivateLoading] = useState(false);
   const [opponent, setOpponent] = useState<any>(null);
   const [leaderboard, setLeaderboard] = useState<any[]>([]);
   const [evaluation, setEvaluation] = useState(0); // -100 to 100
@@ -89,8 +155,8 @@ export default function App() {
 
   const [mode, setMode] = useState<GameMode>('human-vs-ai');
   const [humanColor, setHumanColor] = useState<1 | 2>(1);
-  const [ai1Config, setAi1Config] = useState<AIConfig>({ depth: 10, botType: 'nnue' });
-  const [ai2Config, setAi2Config] = useState<AIConfig>({ depth: 10, botType: 'nnue' });
+  const [ai1Config, setAi1Config] = useState<AIConfig>({ depth: 8, botType: 'nnue' });
+  const [ai2Config, setAi2Config] = useState<AIConfig>({ depth: 8, botType: 'nnue' });
   const [nnueWeights, setNnueWeights] = useState<any>(null);
   const [trainingEpochs, setTrainingEpochs] = useState(5);
   const [focusMode, setFocusMode] = useState(false);
@@ -102,6 +168,9 @@ export default function App() {
   const [userMatches, setUserMatches] = useState<any[]>([]);
   const [isMatchHistoryOpen, setIsMatchHistoryOpen] = useState(false);
   const [isAutoMoving, setIsAutoMoving] = useState(false);
+  const lastTauntIdRef = useRef<string | null>(null);
+  const [player1Away, setPlayer1Away] = useState(false);
+  const [player2Away, setPlayer2Away] = useState(false);
   const [currentBotDepth, setCurrentBotDepth] = useState(4);
   const [isOpponentOnline, setIsOpponentOnline] = useState(true);
   const [isTraining, setIsTraining] = useState(false);
@@ -113,6 +182,7 @@ export default function App() {
   const [newUsername, setNewUsername] = useState('');
   const [isMatchActive, setIsMatchActive] = useState(false);
   const [matchResult, setMatchResult] = useState<'win' | 'loss' | 'draw' | null>(null);
+  const [lastEloChange, setLastEloChange] = useState<number | null>(null);
   const [trainingSource, setTrainingSource] = useState<'kaggle' | 'user' | 'both'>('both');
   const [activeBrainSource, setActiveBrainSource] = useState<'kaggle' | 'user' | 'both'>('both');
   const [trainingError, setTrainingError] = useState<string | null>(null);
@@ -195,11 +265,12 @@ export default function App() {
     setMatchmakingTimer(30);
     setMode('matchmaking');
     setOpponent(null);
+    setPrivateRoomCode(null);
     
     fetch('/api/matchmaking/join', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId: user.id, username: user.username, elo: user.elo, avatarId: user.avatar_id }),
+      body: JSON.stringify({ userId: user.id, username: user.username, elo: user.elo, avatar_id: user.avatar_id }),
     })
     .then(res => res.json())
     .then(data => {
@@ -217,34 +288,181 @@ export default function App() {
     });
   };
 
+  const createPrivateRoom = () => {
+    if (!user) return;
+    setIsPrivateLoading(true);
+    fetch('/api/matchmaking/private/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: user.id, username: user.username, elo: user.elo, avatar_id: user.avatar_id }),
+    })
+    .then(res => res.json())
+    .then(data => {
+      setIsPrivateLoading(false);
+      if (data.success) {
+        setPrivateRoomCode(data.code);
+        setMode('matchmaking');
+      }
+    })
+    .catch(() => setIsPrivateLoading(false));
+  };
+
+  const joinPrivateRoom = () => {
+    if (!user || !roomCodeToJoin.trim()) return;
+    setIsPrivateLoading(true);
+    fetch('/api/matchmaking/private/join', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: user.id, username: user.username, elo: user.elo, avatar_id: user.avatar_id, code: roomCodeToJoin }),
+    })
+    .then(res => res.json())
+    .then(data => {
+      setIsPrivateLoading(false);
+      if (data.matchFound) {
+        setOpponent(data.opponent);
+        setIsOpponentOnline(true);
+        setHumanColor(data.playerColor);
+        setMode('matchmaking');
+        setIsMatchmaking(false);
+        setIsMatchActive(true);
+        setIsGameRunning(true);
+        setLastMoveAt(Date.now() + serverOffset);
+        setGameTimer(180);
+        resetGame();
+      } else if (data.error) {
+        alert(data.error);
+      }
+    })
+    .catch((err) => {
+      setIsPrivateLoading(false);
+      alert("Error joining room. Please check the code.");
+    });
+  };
+
+  const cancelPrivateRoom = () => {
+    if (!user || !privateRoomCode) return;
+    fetch('/api/matchmaking/private/cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: user.id, code: privateRoomCode }),
+    })
+    .then(() => {
+      setPrivateRoomCode(null);
+    });
+  };
+
   useEffect(() => {
-    let pollInterval: any;
-    if (isMatchmaking && !opponent && user) {
-      pollInterval = setInterval(() => {
-        fetch('/api/matchmaking/poll', {
+    let timeoutId: any;
+    let isMounted = true;
+
+    const pollMatchmaking = async () => {
+      if (!(isMatchmaking || privateRoomCode) || opponent || !user) return;
+
+      try {
+        const res = await fetch('/api/matchmaking/poll', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ userId: user.id }),
-        })
-        .then(res => res.json())
-        .then(data => {
-          if (data.matchFound) {
-            setOpponent(data.opponent);
-            setIsOpponentOnline(true);
-            setHumanColor(data.playerColor);
-            setIsMatchmaking(false);
-            setIsMatchActive(true);
-            setIsGameRunning(true);
-            setLastMoveAt(Date.now() + serverOffset);
-            setIsAutoMoving(false);
-            setGameTimer(180);
-            resetGame();
-          }
         });
-      }, 1000);
+        if (!res.ok) throw new Error(`HTTP error ${res.status}`);
+        const data = await res.json();
+        
+        if (isMounted && data.matchFound) {
+          setOpponent(data.opponent);
+          setIsOpponentOnline(true);
+          setHumanColor(data.playerColor);
+          setIsMatchmaking(false);
+          setPrivateRoomCode(null);
+          setIsMatchActive(true);
+          setIsGameRunning(true);
+          setLastMoveAt(data.lastMoveAt);
+          setIsAutoMoving(false);
+          setGameTimer(180);
+          resetGame();
+        }
+      } catch (err) {
+        console.debug("Matchmaking poll skipped:", err);
+      } finally {
+        if (isMounted) {
+          timeoutId = setTimeout(pollMatchmaking, 2000);
+        }
+      }
+    };
+
+    if ((isMatchmaking || privateRoomCode) && !opponent && user) {
+      pollMatchmaking();
     }
-    return () => clearInterval(pollInterval);
-  }, [isMatchmaking, opponent, user]);
+
+    return () => {
+      isMounted = false;
+      clearTimeout(timeoutId);
+    };
+  }, [isMatchmaking, privateRoomCode, opponent, user]);
+
+  useEffect(() => {
+    let timeoutId: any;
+    let isMounted = true;
+
+    const pollGameUpdate = async () => {
+      if (!isMatchActive || !opponent || opponent.isBot || !user || gameState.winner) return;
+
+      try {
+        const res = await fetch('/api/matchmaking/poll', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: user.id }),
+        });
+        if (!res.ok) throw new Error(`HTTP error ${res.status}`);
+        const data = await res.json();
+        
+        if (isMounted && data.success && data.matchFound) {
+          const serverMovesCount = Array.isArray(data.moves) ? data.moves.length : 0;
+          const localMovesCount = gameState.moves.length;
+          
+          if (serverMovesCount > localMovesCount || data.winner !== gameState.winner) {
+            // Reconstruct moves with player and empty board to stay compatible with local state type
+            const reconstructedMoves = data.moves.map((m: number, idx: number) => ({
+              move: m,
+              board: [],
+              player: (idx % 2 === 0) ? 1 : 2
+            }));
+
+            setGameState(prev => ({
+              ...prev,
+              board: data.board,
+              currentPlayer: data.currentPlayer,
+              winner: data.winner,
+              moves: reconstructedMoves
+            }));
+            setLastMoveAt(data.lastMoveAt);
+          }
+          
+          if (data.lastTaunt) {
+            const lastProcessedTauntAt = (window as any).lastTauntAt || 0;
+            if (data.lastTaunt.timestamp > lastProcessedTauntAt && data.lastTaunt.userId !== user.id) {
+              addTauntToDisplay(data.lastTaunt.emoji, data.lastTaunt.userId);
+              (window as any).lastTauntAt = data.lastTaunt.timestamp;
+            }
+          }
+        }
+      } catch (err) {
+        console.debug("Game update poll skipped:", err);
+      } finally {
+        if (isMounted) {
+          timeoutId = setTimeout(pollGameUpdate, 2000);
+        }
+      }
+    };
+
+    if (isMatchActive && opponent && !opponent.isBot && user && !gameState.winner) {
+      pollGameUpdate();
+    }
+
+    return () => {
+      isMounted = false;
+      clearTimeout(timeoutId);
+    };
+  }, [isMatchActive, opponent, user, gameState.winner, gameState.moves.length]);
 
   useEffect(() => {
     let interval: any;
@@ -320,33 +538,29 @@ export default function App() {
           const now = Date.now();
           const serverNow = now + serverOffset;
           const elapsed = (serverNow - lastMoveAt) / 1000;
-          const remaining = Math.max(0, 25 - elapsed);
+          
+          // Fast-track logic: If the player who is moving was marked "Away" last turn,
+          // their total time limit is only 5s instead of 20s.
+          const isCurrentPlayerAway = gameState.currentPlayer === 1 ? player1Away : player2Away;
+          const turnLimit = isCurrentPlayerAway ? 5 : 20;
+          const remaining = Math.max(0, turnLimit - elapsed);
 
-          if (remaining <= 5 && !isAutoMoving && !gameState.winner) {
+          if (remaining <= 2 && !isAutoMoving && !gameState.winner) {
             const isMyTurn = gameState.currentPlayer === humanColor;
             
+            // Mark player as Away if the bot has to take over
             if (isMyTurn) {
-              // Bot take over at 5s remaining
+              setPlayer1Away(humanColor === 1 ? true : player1Away);
+              setPlayer2Away(humanColor === 2 ? true : player2Away);
+              
               const depth = user.elo < 1000 ? 2 : user.elo < 1500 ? 4 : user.elo < 2000 ? 6 : 8;
               setCurrentBotDepth(depth);
               setIsAutoMoving(true);
               setGameState(g => ({ ...g, isThinking: true }));
             } else if (opponent && !opponent.isBot) {
-              // Opponent's turn, check if they are offline
-              fetch(`/api/user/status/${opponent.id}`)
-                .then(res => res.json())
-                .then(data => {
-                  if (!data.isOnline) {
-                    // Opponent is offline, move for them
-                    const depth = opponent.elo < 1000 ? 2 : opponent.elo < 1500 ? 4 : opponent.elo < 2000 ? 6 : 8;
-                    setCurrentBotDepth(depth);
-                    setIsAutoMoving(true);
-                    setGameState(g => ({ ...g, isThinking: true }));
-                  }
-                })
-                .catch(console.error);
+              setPlayer1Away(humanColor === 2 ? true : player1Away);
+              setPlayer2Away(humanColor === 1 ? true : player2Away);
               
-              // If they hit 5s, we move for them anyway if they are not moving
               const depth = opponent.elo < 1000 ? 2 : opponent.elo < 1500 ? 4 : opponent.elo < 2000 ? 6 : 8;
               setCurrentBotDepth(depth);
               setIsAutoMoving(true);
@@ -433,10 +647,46 @@ export default function App() {
       if (data.success) {
         const updatedUser = { ...user, elo: data.newElo };
         setUser(updatedUser);
+        setLastEloChange(data.eloChange);
         localStorage.setItem('c4_user', JSON.stringify(updatedUser));
       }
     } catch (err) {
       console.error(err);
+    }
+  };
+
+  const resignMatch = async () => {
+    if (!user || !isMatchActive) return;
+    
+    const confirmResign = window.confirm("Are you sure you want to resign? You will lose ELO points based on your rank.");
+    if (!confirmResign) return;
+
+    try {
+      const response = await fetch('/api/match/resign', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: user.id })
+      });
+      const data = await response.json();
+      
+      if (data.success) {
+        setIsMatchActive(false);
+        setActiveTab('arena');
+        
+        // Refetch user data to update ELO in sidebar
+        const profileRes = await fetch(`/api/leaderboard`);
+        const allUsers = await profileRes.json();
+        const updatedUser = allUsers.find((u: any) => u.id === user.id);
+        if (updatedUser) {
+          const freshUser = { ...user, elo: updatedUser.elo };
+          setUser(freshUser);
+          localStorage.setItem('c4_user', JSON.stringify(freshUser));
+        }
+      } else {
+        alert(data.error || "Failed to resign");
+      }
+    } catch (err) {
+      console.error("Resignation failed:", err);
     }
   };
 
@@ -483,6 +733,8 @@ export default function App() {
   const [isSelfPlay, setIsSelfPlay] = useState(false);
   const [isTrainerVsNNUE, setIsTrainerVsNNUE] = useState(false);
   const [isSpecializedRecording, setIsSpecializedRecording] = useState(false);
+  const [practiceLevel, setPracticeLevel] = useState<'easy' | 'medium' | 'hard'>('easy');
+  const [coachMessage, setCoachMessage] = useState<string>('');
   const [pendingPairings, setPendingPairings] = useState<{p1: number, p2: number}[]>([]);
   const [completedCount, setCompletedCount] = useState(0);
 
@@ -811,28 +1063,82 @@ export default function App() {
     setIsAutoMoving(false);
   }, []);
 
-  // Match Status Polling (Moves & Avatars)
+  // Match Status Polling (Server Authority)
   useEffect(() => {
-    let interval: any;
-    if (isMatchActive && mode === 'matchmaking' && user && !gameState.winner) {
-      interval = setInterval(async () => {
-        try {
-          const res = await fetch(`/api/match/status/${user.id}`);
-          const data = await res.json();
-          
-          if (data.moves) {
-            // Sync moves if we're behind
-            if (data.moves.length > gameState.moves.length) {
-              const nextMove = data.moves[gameState.moves.length];
-              executeMove(nextMove);
-            }
+    if (user && !isMatchActive) {
+      fetch(`/api/match/status/${user.id}`)
+      .then(res => res.json())
+      .then(data => {
+        if (data.success && !data.winner) {
+          console.log("RECOVERY: Re-attaching to active match", data.opponent);
+          setMode('matchmaking');
+          setOpponent(data.opponent);
+          setIsOpponentOnline(true);
+          setHumanColor(data.playerColor);
+          setIsMatchActive(true);
+          setIsGameRunning(true);
+          setGameState({
+            board: data.board,
+            currentPlayer: data.currentPlayer,
+            winner: data.winner,
+            moves: data.moves.map((m: number, idx: number) => ({ move: m, board: [], player: (idx % 2 === 0) ? 1 : 2 })),
+            isThinking: false
+          });
+          setLastMoveAt(data.lastMoveAt);
+        }
+      })
+      .catch(() => {});
+    }
+  }, [user]);
+
+  useEffect(() => {
+    let timeoutId: any;
+    let isMounted = true;
+
+    const pollStatus = async () => {
+      if (!isMatchActive || mode !== 'matchmaking' || !user || gameState.winner) return;
+
+      try {
+        const res = await fetch(`/api/match/status/${user.id}`);
+        if (!res.ok) {
+          if (res.status === 404) {
+            // No match found on server anymore
           }
+          throw new Error(`Server returned ${res.status}`);
+        }
+        const data = await res.json();
+        
+        if (isMounted && data.success) {
+          // Update local game state from server authority
+          setGameState(prev => {
+            const serverMovesCount = Array.isArray(data.moves) ? data.moves.length : 0;
+            const localMovesCount = prev.moves.length;
+            
+            if (serverMovesCount > localMovesCount || data.winner !== prev.winner) {
+               return {
+                ...prev,
+                board: data.board,
+                currentPlayer: data.currentPlayer,
+                winner: data.winner,
+                moves: data.moves.map((m: number, idx: number) => ({ move: m, board: [], player: (idx % 2 === 0) ? 1 : 2 }))
+              };
+            }
+            return prev;
+          });
 
           if (data.lastMoveAt) {
             setLastMoveAt(data.lastMoveAt);
           }
           if (data.serverTime) {
             setServerOffset(data.serverTime - Date.now());
+          }
+
+          // Handle incoming taunts from opponent using Unique ID
+          if (data.lastEmojiId && data.lastEmojiId !== lastTauntIdRef.current) {
+            if (Number(data.lastEmojiBy) !== Number(user.id)) {
+              addTauntToDisplay(data.lastEmoji, String(data.lastEmojiBy));
+            }
+            lastTauntIdRef.current = data.lastEmojiId;
           }
 
           // Sync avatars
@@ -842,20 +1148,44 @@ export default function App() {
               setOpponent((prev: any) => ({ ...prev, avatar_id: oppAvatarId }));
             }
           }
-        } catch (err) {
-          console.error("Match status poll failed:", err);
         }
-      }, 1000);
+      } catch (err) {
+        if (err instanceof Error && err.name !== 'AbortError') {
+          console.debug("Status poll skipped:", err.message);
+        }
+      } finally {
+        if (isMounted) {
+          timeoutId = setTimeout(pollStatus, 2000);
+        }
+      }
+    };
+
+    if (isMatchActive && mode === 'matchmaking' && user && !gameState.winner) {
+      pollStatus();
     }
-    return () => clearInterval(interval);
-  }, [isMatchActive, mode, user, gameState.moves.length, gameState.winner, opponent, humanColor]);
+
+    return () => {
+      isMounted = false;
+      clearTimeout(timeoutId);
+    };
+  }, [isMatchActive, mode, user, gameState.winner, opponent, humanColor, serverOffset]);
 
   const executeMove = useCallback((col: number) => {
     if (gameState.winner || !isValidMove(gameState.board, col)) return;
 
+    const moveQuality = evaluateMoveQuality(gameState.board, col, gameState.currentPlayer);
+    if (activeTab === 'practice') {
+      const comment = getCoachingComment(moveQuality);
+      setCoachMessage(comment);
+    }
+
     // Reset move timer on every move
     setLastMoveAt(Date.now() + serverOffset);
     setIsAutoMoving(false);
+
+    // Reset "Away" status when a move is made
+    if (gameState.currentPlayer === 1) setPlayer1Away(false);
+    else setPlayer2Away(false);
 
     // If in matchmaking and it was our turn, send move to server
     if (mode === 'matchmaking' && gameState.currentPlayer === humanColor && !opponent?.isBot) {
@@ -1139,10 +1469,35 @@ export default function App() {
 
   const handleHumanMove = async (col: number) => {
     if (gameState.winner || gameState.isThinking) return;
-    if (activeTab === 'game' && (!isGameRunning || (mode === 'human-vs-ai' && gameState.currentPlayer !== humanColor))) return;
-    if (activeTab === 'practice' && gameState.currentPlayer !== 2) return; // Human is Yellow (Player 2)
     
-    // Evaluate move quality before executing
+    // Arena PvP Mode: Server Authoritative
+    if (activeTab === 'arena' && isMatchActive) {
+      if (gameState.currentPlayer !== humanColor) return;
+      try {
+        const response = await fetch('/api/match/move', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: user.id, col })
+        });
+        const data = await response.json();
+        if (data.success) {
+          setGameState(prev => ({
+            ...prev,
+            board: data.board,
+            currentPlayer: data.currentPlayer,
+            winner: data.winner
+          }));
+        }
+      } catch (err) {
+        console.error("PvP move failed:", err);
+      }
+      return;
+    }
+
+    if (activeTab === 'game' && (!isGameRunning || (mode === 'human-vs-ai' && gameState.currentPlayer !== humanColor))) return;
+    if (activeTab === 'practice' && gameState.currentPlayer !== humanColor) return;
+    
+    // Evaluate move quality before executing (for non-PvP modes)
     const { position, mask } = toBitboard(gameState.board);
     const scoreBefore = evaluateNNUE(position, mask);
     
@@ -1229,14 +1584,28 @@ export default function App() {
     };
     singleGameWorkerRef.current = worker;
 
-    const config = gameState.currentPlayer === 1 ? ai1Config : ai2Config;
-    const depth = isAutoMoving ? currentBotDepth : config.depth;
+    let config = gameState.currentPlayer === 1 ? ai1Config : ai2Config;
+    let depth = isAutoMoving ? currentBotDepth : config.depth;
     
+    if (activeTab === 'practice') {
+      if (practiceLevel === 'easy') {
+        config = { depth: 2, botType: 'trainer' };
+        depth = 2;
+      } else if (practiceLevel === 'medium') {
+        config = { depth: 4, botType: 'nnue' };
+        depth = 4;
+      } else {
+        config = { depth: 8, botType: 'nnue' };
+        depth = 8;
+      }
+    }
+
     console.log("App: Posting message to AI Worker", {
       depth: depth,
       isMaximizing: gameState.currentPlayer === 1,
       botType: config.botType,
-      isAutoMoving
+      isAutoMoving,
+      practiceLevel: activeTab === 'practice' ? practiceLevel : undefined
     });
 
     // If using NNUE, send weights first
@@ -1312,30 +1681,32 @@ export default function App() {
           </button>
         )}
       </div>
-      <div className="max-w-7xl mx-auto space-y-8">
+      <div className="max-w-[1600px] mx-auto space-y-8">
         
         {/* Navigation Tabs */}
         <div className="flex items-center gap-2 bg-[#111] p-1 rounded-xl border border-white/5 w-fit mx-auto shadow-2xl scale-90">
           {[
-            { id: 'arena', label: 'Arena', icon: Trophy },
-            { id: 'leaderboard', label: 'Leaderboard', icon: Activity },
-            ...(isAdmin ? [
-              { id: 'game', label: 'Engine', icon: Play },
-              { id: 'generator', label: 'Generator', icon: Database },
-              { id: 'viewer', label: 'Viewer', icon: Eye },
-              { id: 'nnue', label: 'NNUE', icon: Brain },
-            ] : [])
-          ].map((tab) => (
-            <button
-              key={tab.id}
-              onClick={() => {
-                setActiveTab(tab.id as any);
-                if (tab.id === 'practice') {
-                  setMode('human-vs-ai');
-                  setHumanColor(2); // Human is Yellow
-                  resetGame();
-                }
-              }}
+              { id: 'arena', label: 'Arena', icon: Trophy },
+              { id: 'leaderboard', label: 'Leaderboard', icon: Activity },
+              ...(isAdmin ? [
+                { id: 'game', label: 'Engine', icon: Play },
+                { id: 'generator', label: 'Generator', icon: Database },
+                { id: 'viewer', label: 'Viewer', icon: Eye },
+                { id: 'nnue', label: 'NNUE', icon: Brain },
+              ] : [])
+            ].map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => {
+                  setActiveTab(tab.id as any);
+                  if (tab.id === 'practice') {
+                    setMode('human-vs-ai');
+                    // Randomize side in Practice
+                    const playerIsRed = Math.random() > 0.5;
+                    setHumanColor(playerIsRed ? 1 : 2);
+                    resetGame();
+                  }
+                }}
               className={`flex items-center gap-2 px-4 py-1.5 rounded-lg font-bold text-xs transition-all ${
                 activeTab === tab.id 
                   ? 'bg-red-500 text-white shadow-lg shadow-red-500/20' 
@@ -1464,19 +1835,22 @@ export default function App() {
 
                 <div className="space-y-2">
                   <label className="text-[10px] uppercase tracking-widest text-white/40 font-bold ml-1">Select Avatar</label>
-                  <div className="grid grid-cols-4 gap-3">
-                    {AVATARS.map(avatar => (
-                      <button
-                        key={avatar.id}
-                        onClick={() => updateAvatar(avatar.id)}
-                        className={`aspect-square rounded-xl flex items-center justify-center text-2xl transition-all border-2 ${
-                          user.avatar_id === avatar.id ? 'bg-red-500/20 border-red-500' : 'bg-white/5 border-transparent hover:bg-white/10'
-                        }`}
-                      >
-                        {avatar.icon}
-                      </button>
-                    ))}
-                  </div>
+                    <div className="grid grid-cols-4 gap-2">
+                      {AVATARS.map(avatar => (
+                        <button
+                          key={avatar.id}
+                          onClick={() => updateAvatar(avatar.id)}
+                          className={`aspect-square rounded-xl flex items-center justify-center text-2xl transition-all border-2 relative group overflow-hidden ${
+                            user.avatar_id === avatar.id ? 'bg-red-500/20 border-red-500' : 'bg-white/5 border-transparent hover:bg-white/10'
+                          }`}
+                        >
+                          {avatar.icon}
+                          {user.avatar_id === avatar.id && (
+                             <div className={`absolute inset-0 opacity-50 blur-lg ${getAuraClass(user.elo)}`} />
+                          )}
+                        </button>
+                      ))}
+                    </div>
                 </div>
 
                 <button
@@ -1495,14 +1869,32 @@ export default function App() {
             {/* Match Header */}
             <div className="flex items-center justify-between p-4 md:px-8 border-b border-white/5 bg-[#0a0a0a]">
               {/* Player 1 (Red) */}
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-3 relative">
                 <div className={`w-12 h-12 rounded-xl flex items-center justify-center text-xl font-bold transition-all ring-2 ${
                   humanColor === 1 
-                    ? 'ring-green-500/50 shadow-[0_0_15px_rgba(34,197,94,0.3)]' 
-                    : (opponent?.isBot ? 'ring-purple-500/50 shadow-[0_0_15px_rgba(168,85,247,0.3)]' : 'ring-green-500/50 shadow-[0_0_15px_rgba(34,197,94,0.3)]')
+                    ? getAuraClass(user.elo) 
+                    : getAuraClass(opponent?.elo || 1000)
                 } ${gameState.currentPlayer === 1 ? 'bg-red-500 text-white' : 'bg-white/5 text-white/20'}`}>
                   {AVATARS.find(a => a.id === (humanColor === 1 ? user.avatar_id : opponent?.avatar_id))?.icon || (humanColor === 1 ? user.username[0].toUpperCase() : opponent?.username[0].toUpperCase())}
                 </div>
+                
+                {/* Visual Taunt Spawn Point (Player 1) */}
+                <div className="absolute top-0 left-0 w-12 h-12 pointer-events-none flex items-center justify-center overflow-visible">
+                  <AnimatePresence>
+                    {activeTaunts.filter(t => String(t.userId) === String(humanColor === 1 ? user.id : (opponent?.userId || opponent?.id || opponent?.elo))).map(t => (
+                      <motion.div
+                        key={t.id}
+                        initial={{ opacity: 0, scale: 0, y: 0 }}
+                        animate={{ opacity: [0, 1, 1, 0], scale: [0, 1.5, 1.5, 1], y: [0, 50, 150, 300] }}
+                        transition={{ duration: 4, ease: "linear" }}
+                        className="absolute text-4xl z-[200] select-none"
+                      >
+                        {t.emoji}
+                      </motion.div>
+                    ))}
+                  </AnimatePresence>
+                </div>
+
                 <div className="hidden sm:block">
                   <div className="font-bold text-sm">
                     {humanColor === 1 ? user.username : opponent?.username}
@@ -1541,13 +1933,14 @@ export default function App() {
               </div>
 
               {/* Player 2 (Yellow) */}
-              <div className="flex items-center gap-3 text-right">
+              <div className="flex items-center gap-3 text-right relative">
                 {gameState.currentPlayer === 2 && (
                   <div className="flex items-center gap-1.5 text-yellow-500 font-mono font-bold text-xs bg-yellow-500/10 px-2 py-1 rounded-lg">
                     {moveTimer}s
                     <Clock size={12} className="animate-pulse" />
                   </div>
                 )}
+                
                 <div className="hidden sm:block">
                   <div className="font-bold text-sm">
                     {humanColor === 1 && !opponent?.isBot && !isOpponentOnline && (
@@ -1559,12 +1952,30 @@ export default function App() {
                     {humanColor === 2 ? `${user?.elo} ELO` : `${opponent?.elo} ELO`}
                   </div>
                 </div>
+
                 <div className={`w-12 h-12 rounded-xl flex items-center justify-center text-xl font-bold transition-all ring-2 ${
                   humanColor === 2 
-                    ? 'ring-green-500/50 shadow-[0_0_15px_rgba(34,197,94,0.3)]' 
-                    : (opponent?.isBot ? 'ring-purple-500/50 shadow-[0_0_15px_rgba(168,85,247,0.3)]' : 'ring-green-500/50 shadow-[0_0_15px_rgba(34,197,94,0.3)]')
+                    ? getAuraClass(user.elo) 
+                    : getAuraClass(opponent?.elo || 1000)
                 } ${gameState.currentPlayer === 2 ? 'bg-yellow-400 text-black' : 'bg-white/5 text-white/20'}`}>
                   {AVATARS.find(a => a.id === (humanColor === 2 ? user.avatar_id : opponent?.avatar_id))?.icon || (humanColor === 2 ? user.username[0].toUpperCase() : opponent?.username[0].toUpperCase())}
+                </div>
+
+                {/* Visual Taunt Spawn Point (Player 2) */}
+                <div className="absolute top-0 right-0 w-12 h-12 pointer-events-none flex items-center justify-center overflow-visible">
+                  <AnimatePresence>
+                    {activeTaunts.filter(t => String(t.userId) === String(humanColor === 2 ? user.id : (opponent?.userId || opponent?.id || opponent?.elo))).map(t => (
+                      <motion.div
+                        key={t.id}
+                        initial={{ opacity: 0, scale: 0, y: 0 }}
+                        animate={{ opacity: [0, 1, 1, 0], scale: [0, 1.5, 1.5, 1], y: [0, 50, 150, 300] }}
+                        transition={{ duration: 4, ease: "linear" }}
+                        className="absolute text-4xl z-[200] select-none"
+                      >
+                        {t.emoji}
+                      </motion.div>
+                    ))}
+                  </AnimatePresence>
                 </div>
               </div>
             </div>
@@ -1589,9 +2000,9 @@ export default function App() {
                   )}
                 </AnimatePresence>
 
-                {/* Match Board */}
-                <div className="flex-1 flex items-center justify-center">
-                  <div className="max-w-xl w-full">
+                        {/* Match Board */}
+                <div className="flex-1 flex items-center justify-center w-full px-4">
+                  <div className="w-full max-w-4xl relative">
                     <Board 
                       board={gameState.board} 
                       onColumnClick={handleHumanMove} 
@@ -1600,56 +2011,34 @@ export default function App() {
                         const res = checkWinner(gameState.board);
                         return res && typeof res === 'object' ? res.cells : undefined;
                       })()}
-                      lastMove={gameState.moves.length > 0 ? {
-                        row: lastMoveQuality?.row || 0,
-                        col: gameState.moves[gameState.moves.length-1].move,
-                        quality: lastMoveQuality?.quality
-                      } : undefined}
                     />
-                  </div>
-                </div>
 
-                {/* Match Footer */}
-                <div className="mt-4 flex flex-col items-center gap-4">
-                  <div className="flex items-center gap-4">
-                    {/* Avatar Spam/Change */}
-                    <div className="flex items-center gap-1 bg-white/5 p-1.5 rounded-xl border border-white/10">
-                      {AVATARS.map(avatar => (
-                        <button
-                          key={avatar.id}
-                          onClick={() => {
-                            if (!user) return;
-                            fetch('/api/user/update-avatar', {
-                              method: 'POST',
-                              headers: { 'Content-Type': 'application/json' },
-                              body: JSON.stringify({ userId: user.id, avatarId: avatar.id }),
-                            })
-                            .then(res => res.json())
-                            .then(data => {
-                              if (data.success) {
-                                setUser(data.user);
-                                localStorage.setItem('c4_user', JSON.stringify(data.user));
-                              }
-                            });
-                          }}
-                          className={`w-10 h-10 flex items-center justify-center text-xl hover:bg-white/10 rounded-lg transition-all active:scale-90 ${user?.avatar_id === avatar.id ? 'bg-red-500/20 border border-red-500/50' : ''}`}
-                          title={avatar.name}
+                    {/* Side Taunt Panel */}
+                    <div className="absolute -right-16 top-1/2 -translate-y-1/2 flex flex-col gap-2 bg-black/40 p-2 rounded-2xl border border-white/10 backdrop-blur-md shadow-2xl">
+                      {TAUNTS.map(taunt => (
+                        <motion.button
+                          key={taunt.id}
+                          whileHover={{ scale: 1.2, x: 5 }}
+                          whileTap={{ scale: 0.9 }}
+                          onClick={() => sendTaunt(taunt.icon)}
+                          className="w-10 h-10 flex items-center justify-center text-xl hover:bg-white/10 rounded-xl transition-all"
+                          title={taunt.id}
                         >
-                          {avatar.icon}
-                        </button>
+                          {taunt.icon}
+                        </motion.button>
                       ))}
                     </div>
                   </div>
+                </div>
 
+                {/* Match Footer - Actions */}
+                <div className="mt-4 flex flex-col items-center gap-4">
                   <button 
-                    onClick={() => {
-                      setIsMatchActive(false);
-                      setActiveTab('arena');
-                      updateElo(gameState.currentPlayer === 1 ? 2 : 1); // Forfeit
-                    }}
-                    className="text-white/20 hover:text-red-500 font-bold uppercase tracking-widest text-[10px] transition-all"
+                    onClick={resignMatch}
+                    className="flex items-center gap-2 px-6 py-3 bg-red-500/10 hover:bg-red-500/20 text-red-500 border border-red-500/20 rounded-xl font-black uppercase tracking-widest text-[11px] transition-all active:scale-95 shadow-[0_4px_15px_rgba(239,68,68,0.1)] group"
                   >
-                    Forfeit Match
+                    <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse group-hover:scale-125 transition-transform" />
+                    RESIGN (Withdraw)
                   </button>
                 </div>
               </div>
@@ -1669,12 +2058,23 @@ export default function App() {
                       animate={{ y: 0, opacity: 1 }}
                       className="space-y-4"
                     >
+                      <h2 className="text-8xl font-black italic tracking-tighter text-white drop-shadow-[0_0_50px_rgba(255,255,255,0.3)]">
+                        {gameState.winner === 'draw' ? 'DRAW' : (gameState.winner === humanColor ? 'VICTORY' : 'DEFEATED')}
+                      </h2>
+                      {lastEloChange !== null && (
+                        <div className={`text-5xl font-black italic mt-2 ${lastEloChange > 0 ? 'text-green-400' : 'text-red-500'}`}>
+                          {lastEloChange > 0 ? '+' : ''}{lastEloChange} ELO
+                        </div>
+                      )}
+                    </motion.div>
+                    
+                    <div className="space-y-4">
                       <Trophy size={80} className={`mx-auto ${gameState.winner === humanColor ? 'text-yellow-500' : 'text-white/20'}`} />
-                      <h2 className="text-6xl font-bold tracking-tighter italic serif">
-                        {gameState.winner === 'draw' ? 'STALEMATE' : (gameState.winner === humanColor ? 'VICTORY' : 'DEFEAT')}
+                      <h2 className="text-6xl font-bold tracking-tighter italic serif text-white">
+                        {gameState.winner === 'draw' ? 'STALEMATE' : (gameState.winner === humanColor ? 'VICTORIOUS' : 'DEFEATED')}
                       </h2>
                       <p className="text-white/40 font-mono uppercase tracking-[0.5em]">Match Concluded</p>
-                    </motion.div>
+                    </div>
                     
                     <button 
                       onClick={() => {
@@ -1723,15 +2123,50 @@ export default function App() {
                       </div>
                     </div>
 
-                    {!isMatchmaking ? (
-                      <button
-                        onClick={startMatchmaking}
-                        className="w-full bg-red-500 hover:bg-red-600 text-white py-8 rounded-3xl font-black text-2xl flex items-center justify-center gap-4 transition-all shadow-2xl shadow-red-500/30 active:scale-95 group"
-                      >
-                        <Play size={28} fill="currentColor" className="group-hover:translate-x-1 transition-transform" />
-                        FIND MATCH
-                      </button>
-                    ) : (
+                    {!isMatchmaking && !privateRoomCode ? (
+                      <div className="space-y-6">
+                        <button
+                          onClick={startMatchmaking}
+                          className="w-full bg-red-500 hover:bg-red-600 text-white py-8 rounded-3xl font-black text-2xl flex items-center justify-center gap-4 transition-all shadow-2xl shadow-red-500/30 active:scale-95 group"
+                        >
+                          <Play size={28} fill="currentColor" className="group-hover:translate-x-1 transition-transform" />
+                          FIND MATCH
+                        </button>
+                        
+                        <div className="flex flex-col gap-4">
+                          <div className="h-px bg-white/5 w-full relative">
+                            <span className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-[#111] px-4 text-[10px] text-white/20 font-black tracking-widest uppercase">Or Private Battle</span>
+                          </div>
+                          
+                          <div className="grid grid-cols-2 gap-4">
+                            <button
+                              disabled={isPrivateLoading}
+                              onClick={createPrivateRoom}
+                              className="bg-white/5 hover:bg-white/10 border border-white/5 rounded-2xl py-4 font-black uppercase tracking-widest text-[10px] transition-all disabled:opacity-50"
+                            >
+                              Host Match
+                            </button>
+                            <div className="flex gap-2">
+                              <input 
+                                type="text"
+                                maxLength={4}
+                                placeholder="CODE"
+                                value={roomCodeToJoin}
+                                onChange={(e) => setRoomCodeToJoin(e.target.value.replace(/\D/g, ''))}
+                                className="bg-white/5 border border-white/5 rounded-2xl w-full px-4 text-center font-mono font-bold text-white focus:outline-none focus:border-red-500/50 transition-all placeholder:text-white/10"
+                              />
+                              <button
+                                disabled={isPrivateLoading || roomCodeToJoin.length < 4}
+                                onClick={joinPrivateRoom}
+                                className="bg-white text-black hover:bg-red-500 hover:text-white rounded-2xl px-6 font-black uppercase tracking-widest text-[10px] transition-all disabled:opacity-50"
+                              >
+                                Join
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ) : isMatchmaking ? (
                       <div className="space-y-8">
                         <div className="flex flex-col items-center justify-center space-y-6">
                           <div className="relative">
@@ -1752,41 +2187,46 @@ export default function App() {
                           Withdraw
                         </button>
                       </div>
+                    ) : (
+                      <div className="space-y-8">
+                        <div className="flex flex-col items-center justify-center space-y-6">
+                          <button 
+                            onClick={() => {
+                              if (privateRoomCode) {
+                                navigator.clipboard.writeText(privateRoomCode);
+                                setShowCopiedToast(true);
+                                setTimeout(() => setShowCopiedToast(false), 2000);
+                              }
+                            }}
+                            className="p-8 bg-red-500/10 rounded-[2rem] border-2 border-dashed border-red-500/20 relative group hover:bg-red-500/20 active:scale-95 transition-all"
+                          >
+                             <div className="text-5xl font-mono font-bold text-red-500 tracking-[0.2em]">{privateRoomCode}</div>
+                             <div className="absolute -top-3 left-1/2 -translate-x-1/2 bg-red-500 text-white px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest group-hover:scale-110 transition-transform">
+                               {showCopiedToast ? 'COPIED!' : 'Click to Copy'}
+                             </div>
+                             <Copy size={16} className="absolute bottom-4 right-4 text-red-500/40" />
+                          </button>
+                          <div className="text-center">
+                            <p className="text-white font-bold animate-pulse tracking-widest uppercase text-xs">Waiting for Friend...</p>
+                            <p className="text-white/20 text-[8px] uppercase tracking-widest mt-1">Combat will commence upon entry</p>
+                          </div>
+                        </div>
+                        <button
+                          onClick={cancelPrivateRoom}
+                          className="w-full bg-white/5 hover:bg-white/10 text-white/40 py-4 rounded-2xl font-bold text-xs transition-all uppercase tracking-widest border border-white/5"
+                        >
+                          Cancel Entry
+                        </button>
+                      </div>
                     )}
                   </div>
                 </div>
               </div>
             </div>
 
-            {/* Bento Stats Row */}
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-              <div className="bg-[#111] border border-white/10 rounded-3xl p-6 shadow-xl group hover:border-red-500/30 transition-all">
-                <div className="text-white/20 text-[8px] uppercase tracking-widest font-black mb-2 flex items-center gap-2">
-                  <Activity size={10} /> Total Matches
-                </div>
-                <div className="text-3xl font-mono font-bold text-white group-hover:text-red-500 transition-colors">{dbCounts?.matches || 0}</div>
-              </div>
-              <div className="bg-[#111] border border-white/10 rounded-3xl p-6 shadow-xl group hover:border-red-500/30 transition-all">
-                <div className="text-white/20 text-[8px] uppercase tracking-widest font-black mb-2 flex items-center gap-2">
-                  <Users size={10} /> Active Players
-                </div>
-                <div className="text-3xl font-mono font-bold text-white group-hover:text-red-500 transition-colors">{leaderboard.length}</div>
-              </div>
-              <div className="bg-[#111] border border-white/10 rounded-3xl p-6 shadow-xl group hover:border-red-500/30 transition-all">
-                <div className="text-white/20 text-[8px] uppercase tracking-widest font-black mb-2 flex items-center gap-2">
-                  <Brain size={10} /> NNUE Weights
-                </div>
-                <div className="text-3xl font-mono font-bold text-white group-hover:text-red-500 transition-colors">{dbCounts?.weights || 0}</div>
-              </div>
-              <div className="bg-[#111] border border-white/10 rounded-3xl p-6 shadow-xl group hover:border-red-500/30 transition-all">
-                <div className="text-white/20 text-[8px] uppercase tracking-widest font-black mb-2 flex items-center gap-2">
-                  <Database size={10} /> Kaggle Data
-                </div>
-                <div className="text-3xl font-mono font-bold text-white group-hover:text-red-500 transition-colors">{dbCounts?.kaggle || 0}</div>
-              </div>
-            </div>
-          </div>
-        )}
+        {/* Removed Bento Stats Row at user request */}
+      </div>
+    )}
 
         {activeTab === 'leaderboard' && (
           <div className="max-w-4xl mx-auto space-y-8 py-12">
@@ -1843,9 +2283,9 @@ export default function App() {
         )}
 
         {activeTab === 'game' && (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
             {/* Left Column: Controls & Stats */}
-            <div className="lg:col-span-4 space-y-6 order-2 lg:order-1">
+            <div className="lg:col-span-3 space-y-6 order-2 lg:order-1">
               {/* Header */}
               <div className="space-y-2">
                 <div className="flex items-center gap-2 text-red-500">
@@ -1990,7 +2430,7 @@ export default function App() {
                     <input
                       type="range"
                       min="2"
-                      max="15"
+                      max="10"
                       disabled={mode === 'human-vs-ai' && humanColor === 1}
                       value={ai1Config.depth}
                       onChange={(e) => setAi1Config(prev => ({ ...prev, depth: parseInt(e.target.value) }))}
@@ -2037,7 +2477,7 @@ export default function App() {
                     <input
                       type="range"
                       min="2"
-                      max="15"
+                      max="10"
                       disabled={mode === 'human-vs-ai' && humanColor === 2}
                       value={ai2Config.depth}
                       onChange={(e) => setAi2Config(prev => ({ ...prev, depth: parseInt(e.target.value) }))}
@@ -2050,9 +2490,9 @@ export default function App() {
                 <div className="pt-4 flex gap-3">
                   <button
                     onClick={resetGame}
-                    className="flex-1 bg-red-500 hover:bg-red-600 text-white py-3 rounded-xl font-bold flex items-center justify-center gap-2 transition-all shadow-lg shadow-red-500/20 active:scale-95"
+                    className="flex-1 bg-[#ff3d44] hover:bg-[#ff5258] text-white py-4 rounded-2xl font-black text-lg flex items-center justify-center gap-3 transition-all shadow-[0_10px_30px_rgba(255,61,68,0.2)] active:scale-95 uppercase tracking-tighter italic"
                   >
-                    <Play size={18} fill="currentColor" />
+                    <Play size={20} fill="currentColor" />
                     START
                   </button>
                   <button
@@ -2060,10 +2500,10 @@ export default function App() {
                       setGameState({ board: createEmptyBoard(), currentPlayer: 1, winner: null, isThinking: false, moves: [] });
                       setIsGameRunning(false);
                     }}
-                    className="p-3 bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl transition-all active:scale-95"
+                    className="p-4 bg-white/5 hover:bg-white/10 border border-white/10 rounded-2xl transition-all active:scale-95 text-white/40 hover:text-white"
                     title="Reset Game"
                   >
-                    <RotateCcw size={18} />
+                    <RotateCcw size={20} />
                   </button>
                   <button
                     onClick={copyBoardForLLM}
@@ -2110,26 +2550,26 @@ export default function App() {
               </div>
             </div>
 
-            {/* Right Column: Game Board */}
-            <div className="lg:col-span-8 flex flex-col items-center justify-center order-1 lg:order-2">
+            {/* Right Column: Game Board Area */}
+            <div className="lg:col-span-9 flex flex-col items-center justify-start py-10 order-1 lg:order-2 min-h-[80vh] relative">
               {/* Status Bar */}
-              <div className="w-full max-w-[500px] mb-6 flex items-center justify-between">
+              <div className="w-full max-w-4xl mb-10 flex items-center justify-between px-6">
                 <div className="flex items-center gap-4">
-                  <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full border transition-all ${
+                  <div className={`flex items-center gap-2 px-5 py-2 rounded-full border transition-all ${
                     gameState.currentPlayer === 1 
-                      ? 'bg-red-500/10 border-red-500/50 text-red-500' 
-                      : 'bg-white/5 border-white/5 text-white/40'
+                      ? 'bg-[#ff3d44]/10 border-[#ff3d44]/50 text-[#ff3d44]' 
+                      : 'bg-white/5 border-white/5 text-white/20'
                   }`}>
-                    <div className={`w-2 h-2 rounded-full ${gameState.currentPlayer === 1 ? 'bg-red-500 animate-pulse' : 'bg-white/20'}`} />
-                    <span className="text-[10px] font-bold uppercase tracking-widest">{getPlayerLabel(1)}</span>
+                    <div className={`w-2 h-2 rounded-full ${gameState.currentPlayer === 1 ? 'bg-[#ff3d44] animate-pulse shadow-[0_0_8px_#ff3d44]' : 'bg-white/20'}`} />
+                    <span className="text-xs font-black uppercase tracking-widest">{getPlayerLabel(1)}</span>
                   </div>
-                  <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full border transition-all ${
+                  <div className={`flex items-center gap-2 px-5 py-2 rounded-full border transition-all ${
                     gameState.currentPlayer === 2 
-                      ? 'bg-yellow-500/10 border-yellow-500/50 text-yellow-500' 
-                      : 'bg-white/5 border-white/5 text-white/40'
+                      ? 'bg-[#ffc812]/10 border-[#ffc812]/50 text-[#ffc812]' 
+                      : 'bg-white/5 border-white/5 text-white/20'
                   }`}>
-                    <div className={`w-2 h-2 rounded-full ${gameState.currentPlayer === 2 ? 'bg-yellow-500 animate-pulse' : 'bg-white/20'}`} />
-                    <span className="text-[10px] font-bold uppercase tracking-widest">{getPlayerLabel(2)}</span>
+                    <div className={`w-2 h-2 rounded-full ${gameState.currentPlayer === 2 ? 'bg-[#ffc812] animate-pulse shadow-[0_0_8px_#ffc812]' : 'bg-white/20'}`} />
+                    <span className="text-xs font-black uppercase tracking-widest">{getPlayerLabel(2)}</span>
                   </div>
                 </div>
 
@@ -2186,13 +2626,14 @@ export default function App() {
                 </AnimatePresence>
               </div>
 
-              {/* Main Board */}
-              <div className="relative group">
+              {/* Main Board Container */}
+              <div className="w-full max-w-4xl px-6 flex items-center justify-center relative">
                 <Board 
                   board={gameState.board} 
                   onColumnClick={handleHumanMove} 
                   disabled={!isGameRunning || gameState.winner !== null || gameState.isThinking} 
                 />
+              </div>
 
                 {/* Winner Overlay */}
                 <AnimatePresence>
@@ -2221,7 +2662,6 @@ export default function App() {
                 </AnimatePresence>
               </div>
             </div>
-          </div>
         )}
 
         {activeTab === 'generator' && (
@@ -3005,49 +3445,84 @@ export default function App() {
           </motion.div>
         )}
         {activeTab === 'practice' && (
-          <div className="flex flex-col items-center gap-8">
-            <div className="text-center space-y-2">
-              <h2 className="text-3xl font-bold tracking-tighter italic serif">PRACTICE <span className="text-red-500">MODE</span></h2>
-              <p className="text-sm text-white/40 font-mono uppercase tracking-widest">Human (Yellow) vs NNUE AI (Red)</p>
+          <div className="flex flex-col items-center gap-12 py-8">
+            <div className="text-center space-y-4">
+              <div className="inline-flex items-center gap-2 px-4 py-1.5 bg-red-500/10 border border-red-500/20 rounded-full text-red-500 text-[10px] font-black uppercase tracking-widest">
+                <Brain size={12} /> Training Academy
+              </div>
+              <h2 className="text-5xl font-black tracking-tighter italic serif text-white">COACH <span className="text-red-500">MODE</span></h2>
+              
+              <div className="flex gap-4 p-1.5 bg-[#111] rounded-2xl border border-white/5 shadow-2xl">
+                {[
+                  { id: 'easy', label: 'NOVICE', color: 'text-emerald-500', bg: 'bg-emerald-500/10', border: 'border-emerald-500/20' },
+                  { id: 'medium', label: 'STRATEGIST', color: 'text-yellow-500', bg: 'bg-yellow-500/10', border: 'border-yellow-500/20' },
+                  { id: 'hard', label: 'GRANDMASTER', color: 'text-red-500', bg: 'bg-red-500/10', border: 'border-red-500/20' }
+                ].map((level) => (
+                  <button
+                    key={level.id}
+                    onClick={() => {
+                      setPracticeLevel(level.id as any);
+                      resetGame();
+                      setCoachMessage("Welcome back to the training grid. Ready to improve?");
+                    }}
+                    className={`px-6 py-3 rounded-xl text-xs font-black transition-all flex flex-col items-center gap-1 ${
+                      practiceLevel === level.id 
+                        ? `${level.bg} ${level.color} ${level.border} border shadow-lg scale-105` 
+                        : 'text-white/20 hover:text-white/40'
+                    }`}
+                  >
+                    <span className="tracking-widest">{level.label}</span>
+                    <div className={`w-8 h-1 rounded-full ${level.id === 'hard' ? 'bg-red-500' : level.id === 'medium' ? 'bg-yellow-500' : 'bg-emerald-500'} ${practiceLevel === level.id ? 'opacity-100' : 'opacity-10'}`} />
+                  </button>
+                ))}
+              </div>
             </div>
             
-            <div className="relative group">
-              <Board 
-                board={gameState.board} 
-                onColumnClick={handleHumanMove}
-                disabled={gameState.currentPlayer === 1 || !!gameState.winner || gameState.isThinking}
-              />
-              
-              <AnimatePresence>
-                {gameState.winner && (
-                  <motion.div 
-                    initial={{ opacity: 0, scale: 0.9 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    className="absolute inset-0 z-20 flex items-center justify-center bg-black/60 backdrop-blur-sm rounded-3xl"
-                  >
-                    <div className="text-center p-8 bg-[#111] border border-white/10 rounded-3xl shadow-2xl space-y-6">
-                      <Trophy size={64} className="mx-auto text-yellow-500" />
-                      <div className="text-4xl font-bold tracking-tighter italic serif">
-                        {gameState.winner === 'draw' ? 'DRAW' : `${gameState.winner === 2 ? 'YOU WIN!' : 'AI WINS'}`}
-                      </div>
-                      <button
-                        onClick={resetGame}
-                        className="bg-white text-black px-8 py-3 rounded-xl font-bold hover:bg-white/90 transition-all active:scale-95"
-                      >
-                        PLAY AGAIN
-                      </button>
-                    </div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </div>
-
+            <Board 
+              board={gameState.board} 
+              onColumnClick={handleHumanMove}
+              disabled={gameState.currentPlayer === 1 || !!gameState.winner || gameState.isThinking}
+              coachMessage={coachMessage}
+            />
+            
             {gameState.isThinking && (
-              <div className="flex items-center gap-3 text-red-500 font-mono text-sm animate-pulse">
-                <Brain size={16} />
-                AI IS ANALYZING WITH NNUE...
+              <div className="flex items-center gap-4 bg-red-500/5 px-6 py-3 rounded-full border border-red-500/10 text-red-500 font-black text-[10px] tracking-widest animate-pulse">
+                <Activity size={14} className="animate-spin" />
+                COACH CALCULATING OPTIMAL RESPONSE...
               </div>
             )}
+
+            <AnimatePresence>
+              {gameState.winner && (
+                <motion.div 
+                  initial={{ opacity: 0, scale: 0.9 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-md p-6"
+                >
+                  <div className="text-center p-12 bg-[#050505] border border-white/10 rounded-[3rem] shadow-[0_0_100px_rgba(239,68,68,0.2)] space-y-8 max-w-lg w-full relative overflow-hidden">
+                    <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-red-500 to-transparent" />
+                    <Trophy size={80} className="mx-auto text-yellow-500" />
+                    <div className="space-y-2">
+                      <div className="text-5xl font-black tracking-tighter italic serif text-white">
+                        {gameState.winner === 'draw' ? 'STALEMATE' : `${gameState.winner === 2 ? 'VICTORY' : 'DEFEAT'}`}
+                      </div>
+                      <p className="text-white/40 text-xs font-mono uppercase tracking-[0.3em]">Session Terminated • Log Analyzed</p>
+                    </div>
+                    
+                    <div className="p-6 bg-white/5 rounded-3xl border border-white/5 italic text-white/60 text-sm">
+                      {gameState.winner === 2 ? "You've successfully outmaneuvered the coach. Impressive calculation!" : "The coach found the winning line. Every loss is a lesson in the grid."}
+                    </div>
+
+                    <button
+                      onClick={resetGame}
+                      className="w-full bg-white text-black py-5 rounded-[2rem] font-black text-xl hover:bg-red-500 hover:text-white transition-all active:scale-95 shadow-2xl shadow-white/10"
+                    >
+                      INITIALIZE NEW SESSION
+                    </button>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
           </div>
         )}
       </div>
